@@ -101,9 +101,9 @@ def get_abscoef(
             h.fetch(gas_name,isoto_numbers[gas_name],1,1,3500, Parameters=['nu', 'Sw'])
         except Exception as e:
             l.exception(f"Failed to fetch data for {gas_name} (isotope {isoto_numbers[gas_name]}): {e}")
-            h.fetch(gas_name,isoto_numbers[gas_name],1,1,3500)
-            Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)),
-                  ('>=', intensity_cutoff))    
+            h.fetch(gas_name,isoto_numbers[gas_name],1,min(wavenumbers),max(wavenumbers)
+            )
+            Cond = ('>=', 'Sw', intensity_cutoff)
             h.select(gas_name, Conditions=Cond, DestinationTableName='filtered')
 
 
