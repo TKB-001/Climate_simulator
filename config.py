@@ -2,9 +2,11 @@ import os
 from numpy import radians
 
 
+
 """citation for much of the planetary (earth) infomation: [1] NASA, "Earth Fact Sheet," NASA Solar System Exploration, Apr. 22, 2024.
  [Online]. Available: https://nssdc.gsfc.nasa.gov/planetary/factsheet/earthfact.html """
 
+'________EDITABLE_______'
 
 image_path = os.path.expanduser(r"42.png")
 BASIS = 'aug-cc-pVDZ'
