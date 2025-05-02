@@ -21,7 +21,7 @@ l.info('check')
 
 
 
-isoto_numbers,  cas_numbers, permittivity_data, depolarization, polarizability_mol =begin()
+isoto_numbers,  cas_numbers, permittivity_data, depolarization, polarizability_mol = begin()
 
 Map_image = pygame.image.load(str(image_path))
 
@@ -98,17 +98,13 @@ def get_abscoef(
         h.select(gas_name, Conditions=Cond, DestinationTableName='filtered')
     except Exception:
         try:
-            h.fetch(gas_name,isoto_numbers[gas_name],1,1,3500, Parameters=['nu', 'Sw'])
+            h.fetch(gas_name,isoto_numbers[gas_name],1,min(wavenumbers),max(wavenumbers), Parameters=['nu', 'Sw'])
         except Exception as e:
             l.exception(f"Failed to fetch data for {gas_name} (isotope {isoto_numbers[gas_name]}): {e}")
             h.fetch(gas_name,isoto_numbers[gas_name],1,min(wavenumbers),max(wavenumbers))
             Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)))
             h.select(gas_name, Conditions=Cond, DestinationTableName='filtered')
              
-
-
-
-
 
     alpha, nu = h.absorptionCoefficient_Voigt(
         SourceTables='filtered',
