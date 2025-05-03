@@ -93,7 +93,7 @@ def get_abscoef(
     ):
 
     Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)),
-                  ('>=', 'Sw', intensity_cutoff))    
+                  ('>=', 'sw', intensity_cutoff))    
     try:
         h.select(gas_name, Conditions=Cond, DestinationTableName='filtered')
     except Exception:
