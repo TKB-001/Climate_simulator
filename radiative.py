@@ -163,6 +163,7 @@ class Irradiance:
         l.info("Mean temp: %f",scalar_temp )
 
         def step(current_time):
+            global I_star, N_total, L_total, PP
             days_since_start = current_time / (24 * 3600)
 
             declination = axial_tilt * np.sin(2 * np.pi * days_since_start / orbital_period_days)
@@ -189,7 +190,7 @@ class Irradiance:
             except Exception:    
                 τ = compute_tau(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 1000)
             l.info("mean τ: %f", np.mean(τ))
-            λ = 500e-9
+            λ = np.float64(500e-9)
             r_scatter = ((24*np.pow(np.pi, 3))/(np.pow(λ ,4))*N_total**2)*(L_total**2)*((6+3*depolarization)/(6-7*depolarization))
              # the equation above is a theoretical model based on standard Rayleigh scattering principles.
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
@@ -231,3 +232,4 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
+
