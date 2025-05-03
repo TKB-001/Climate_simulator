@@ -158,8 +158,9 @@ def begin():
 
     for compound, isoto in isoto_numbers.items():
         try:
-            h.fetch(compound,isoto,1,1,3500, Parameters=['nu', 'Sw']) #figure this out
+            h.fetch(compound,isoto,1,1,3500, Parameters=['nu', 'sw']) 
         except Exception as e:
             l.exception(f"Failed to fetch data for {compound} (isotope {isoto}): {e}")
     return isoto_numbers,  cas_numbers, permittivity_data, depolarization, polarizability_mol
+
 
