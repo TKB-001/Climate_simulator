@@ -50,11 +50,12 @@ def generate_albedo_map():
     albedo_map = np.clip(albedo_map, 0, 0.8)
     return albedo_map
 
+L_star, R_exoplanet, R_star, rotation_period_sec, axial_tilt, orbital_period_sec  = convert()
 
 albedo_map = generate_albedo_map()
 def calculate_temperature(aldebo, greenhouse):
     'only use bond aldebo for realistic results'
-    return np.power(((1-aldebo)*L_star)/(4*np.pi*(R_exoplanet**2)*5.67e-8), 1/4)*greenhouse
+    return np.power(((1-aldebo)*L_star)/(16*np.pi*(R_exoplanet**2)*5.67e-8), 0.25)*greenhouse
 
 t = calculate_temperature(albedo_map, 1)
 
@@ -171,3 +172,4 @@ def initialize_wavenumbers():
     wavenumbers = pd.DataFrame({"nu": np.linspace(50, 3500, 350000)})
     wavenumbers["inpower"]= wavenumbers.nu.apply(lambda x: planckWNCM(x, np.mean(t)))  
     return wavenumbers
+   
