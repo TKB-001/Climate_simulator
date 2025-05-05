@@ -1,1 +1,1 @@
-calculates solar irradiance 
+executes main code
