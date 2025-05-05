@@ -166,11 +166,10 @@ class Irradiance:
         }
         alpha_arrays = [alpha for alpha, nu in cs.values()]
         s_tot = np.sum(alpha_arrays, axis=0).astype(np.float32)
-        tau_abs = np.zeros_like(ND[next(iter(ND))])
         l.info("Mean temp: %f",scalar_temp )
 
         def step(current_time):
-            global I_star, N_total, L_total, PP, tau_abs
+            global I_star, N_total, L_total, PP
             days_since_start = current_time / (24 * 3600)
 
             declination = axial_tilt * np.sin(2 * np.pi * days_since_start / orbital_period_days)
@@ -188,6 +187,7 @@ class Irradiance:
             H_atmosphere = (8.314*temp)/(G*molar_mass)
 
             air_mass_temp = (np.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * np.sin(zenith))**2) - exoplanet_R * np.cos(zenith)) * 100.0
+            tau_abs = np.zeros_like(ND[next(iter(ND))])
             path = air_mass_temp/100
             for gas, alpha_val in alpha_targeted.items():
                 tau_abs += alpha_val * ND[gas] * path
@@ -247,6 +247,5 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
-
 
 
