@@ -21,8 +21,7 @@ l.basicConfig(
 l.info('check')
 
 
-
-N_total, L_total, PP = start()
+N_total, L_total, PP, ND  = start()
 wavenumbers = initialize_wavenumbers()
 I_star = wavenumbers["inpower"].to_numpy()
 L_star, R_exoplanet, R_star, rotation_period_sec, axial_tilt, orbital_period_sec = convert()
@@ -160,6 +159,11 @@ class Irradiance:
         v = wavenumbers["nu"].to_numpy()   
         alpha_arrays = [alpha for alpha, nu in cs.values()]
         s_tot = np.sum(alpha_arrays, axis=0).astype(np.float32)
+        alpha_weighted = []
+        for gas, (alpha, nu) in cs.items():
+            alpha_weighted.append(alpha * ND[gas]) 
+        alpha_weighted = np.array(alpha_weighted)
+        abs_coeff = np.sum(alpha_weighted, axis=0) 
         l.info("Mean temp: %f",scalar_temp )
 
         def step(current_time):
@@ -191,21 +195,30 @@ class Irradiance:
                 τ = compute_tau(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 1000)
             l.info("mean τ: %f", np.mean(τ))
             λ = np.float64(500e-9)
-            r_scatter = ((24*np.pow(np.pi, 3))/(np.pow(λ ,4))*N_total**2)*(L_total**2)*((6+3*depolarization)/(6-7*depolarization))
+            r_scatter = ((24 * np.pi**3 / λ**4) * (L_total**2) * ((6+3*depolarization)/(6-7*depolarization))) * N_total  
              # the equation above is a theoretical model based on standard Rayleigh scattering principles.
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
             [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
             '''
             l.info("mean r_scatter: %f", np.mean(r_scatter))  
-            SA = r_scatter/(r_scatter+(τ))
-            l.info("mean SA: %f", np.mean(SA))
-            flux_diffuse = ((I0*albedo_map*SA)/(1-SA*albedo_map))+((τ*I0)/(1-SA*albedo_map)) 
+            tau_scat = r_scatter * N_total
+            path = air_mass_temp/100
+            tau_abs = abs_coeff * path 
+            tau_tot  = tau_scat + tau_abs
+            l.info("mean tau_tot: %f", np.mean(tau_tot))
+            omega0 = tau_scat / tau_tot
+            F_dir = I0 * cos_zenith * np.exp(-tau_tot / cos_zenith)
+            g  = 0.0
+            F_dir = I0 * cos_zenith * np.exp(-tau_tot / cos_zenith)
+            flux_diffuse =  (I0 * cos_zenith) \
+            * (omega0 / (2*(1 - omega0*g))) \
+            * (1 - np.exp(-tau_tot / cos_zenith))
             '''formulation derived from two-stream radiative transfer approximations.
-            citations: N. D. Shine, "Parametrization of the shortwave flux over high albedo surfaces as a function of cloud thickness and surface albedo," 
-            Quarterly Journal of the Royal Meteorological Society, vol. 110, no. 465, pp. 747-764, 1984, doi: 10.1002/qj.49711046511. G. E. Thomas and K. Stamnes,
-            Radiative Transfer in the Atmosphere and Ocean. Cambridge, U.K.: Cambridge University Press, 1999. '''
+            citation: [1] P. J. Webster and R. Lukas, “Tropical ocean-atmosphere interaction:
+            The role of clouds in the radiative feedback,” J. Atmos. Sci., vol. 37, no. 3, pp. 630-
+            643, Mar. 1980. [Online]. Available: https://journals.ametsoc.org/view/journals/atsc/37/3/1520-0469_1980_037_0630_tsatrt_2_0_co_2.xml'''
             l.info("mean flux_diffuse: %f", np.mean(flux_diffuse))
-            irradiance_array = flux_diffuse * cos_zenith 
+            irradiance_array = F_dir + flux_diffuse
             if np.isnan(irradiance_array).any():
                 l.warning("Irradiance array contains NaN values")
             if np.isinf(irradiance_array).any():
@@ -232,4 +245,5 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
+
 
