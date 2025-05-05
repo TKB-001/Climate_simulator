@@ -144,6 +144,8 @@ class Irradiance:
 
                 return d_tau_out.copy_to_host()
     def calculate_irradiance_time(self, time, time_range, samples, cs):
+        λ = np.float64(500e-9)
+        v_target = 1/(λ) / 100.0
         start_time = time - time_range
         end_time = time + time_range
 
@@ -157,17 +159,18 @@ class Irradiance:
         temp = t
         scalar_temp = np.mean(temp).item()
         v = wavenumbers["nu"].to_numpy()   
+        k = np.argmin(np.abs(v - v_target))
+        alpha_targeted = { 
+        gas: alpha[k] 
+        for (gas, (alpha, nu)) in cs.items()
+        }
         alpha_arrays = [alpha for alpha, nu in cs.values()]
         s_tot = np.sum(alpha_arrays, axis=0).astype(np.float32)
-        alpha_weighted = []
-        for gas, (alpha, nu) in cs.items():
-            alpha_weighted.append(alpha * ND[gas]) 
-        alpha_weighted = np.array(alpha_weighted)
-        abs_coeff = np.sum(alpha_weighted, axis=0) 
+        tau_abs = np.zeros_like(ND[next(iter(ND))])
         l.info("Mean temp: %f",scalar_temp )
 
         def step(current_time):
-            global I_star, N_total, L_total, PP
+            global I_star, N_total, L_total, PP, tau_abs
             days_since_start = current_time / (24 * 3600)
 
             declination = axial_tilt * np.sin(2 * np.pi * days_since_start / orbital_period_days)
@@ -185,6 +188,9 @@ class Irradiance:
             H_atmosphere = (8.314*temp)/(G*molar_mass)
 
             air_mass_temp = (np.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * np.sin(zenith))**2) - exoplanet_R * np.cos(zenith)) * 100.0
+            path = air_mass_temp/100
+            for gas, alpha_val in alpha_targeted.items():
+                tau_abs += alpha_val * ND[gas] * path
             r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec)
             scale = (R_star / r_t)**2 
             I_star = I_star * scale
@@ -194,22 +200,18 @@ class Irradiance:
             except Exception:    
                 τ = compute_tau(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 1000)
             l.info("mean τ: %f", np.mean(τ))
-            λ = np.float64(500e-9)
             r_scatter = ((24 * np.pi**3 / λ**4) * (L_total**2) * ((6+3*depolarization)/(6-7*depolarization))) * N_total  
              # the equation above is a theoretical model based on standard Rayleigh scattering principles.
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
             [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
             '''
             l.info("mean r_scatter: %f", np.mean(r_scatter))  
-            tau_scat = r_scatter * N_total
-            path = air_mass_temp/100
-            tau_abs = abs_coeff * path 
+            tau_scat = r_scatter * N_total * air_mass_temp
             tau_tot  = tau_scat + tau_abs
             l.info("mean tau_tot: %f", np.mean(tau_tot))
             omega0 = tau_scat / tau_tot
             F_dir = I0 * cos_zenith * np.exp(-tau_tot / cos_zenith)
             g  = 0.0
-            F_dir = I0 * cos_zenith * np.exp(-tau_tot / cos_zenith)
             flux_diffuse =  (I0 * cos_zenith) \
             * (omega0 / (2*(1 - omega0*g))) \
             * (1 - np.exp(-tau_tot / cos_zenith))
@@ -245,5 +247,6 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
+
 
 
