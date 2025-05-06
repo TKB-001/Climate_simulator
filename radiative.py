@@ -1,11 +1,11 @@
 import numpy as np
 import pygame
 from numba import prange, cuda, njit
-from optics import albedo_map, start, initialize_wavenumbers, get_abscoef, calculate_temperature
+from optics import albedo_map, start, initialize_wavenumbers, get_abscoef, calculate_temperature, polarizability_mol
 import math
 from config import *
 import logging as l
-from chemistry import depolarization 
+from chemistry import depolarization
 from concurrent.futures import ThreadPoolExecutor
 from interplanetary import orbital_distance
 
@@ -165,7 +165,12 @@ class Irradiance:
         for (gas, (alpha, nu)) in cs.items()
         }
         alpha_arrays = [alpha for alpha, nu in cs.values()]
-        s_tot = np.sum(alpha_arrays, axis=0).astype(np.float32)
+        s_abs   = np.sum(alpha_arrays, axis=0).astype(np.float32)
+        lambda_m   = 1.0/(v*100.0)
+        r_scatter =     24 * np.pi**3* polarizability_mol**2* (6 + 3 * depolarization)/ (6 - 7 * depolarization) / (lambda_m**4)  
+        s_tot = (s_abs + r_scatter).astype(np.float32)  
+        R_mean = np.mean(r_scatter) 
+
         abs_stack = np.stack(alpha_arrays, axis=0)
 
         l.info("Mean temp: %f",scalar_temp )
@@ -202,22 +207,17 @@ class Irradiance:
                 τ = self.compute_tau_cuda(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 5000)
             except Exception:    
                 τ = compute_tau(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 1000)
-            l.info("mean τ: %f", np.mean(τ))
-            r_scatter = ((24 * np.pi**3 / v**4) * (L_total**2) * ((6+3*depolarization)/(6-7*depolarization))) * N_total  
-            tau_scat = r_scatter[:,None,None] * N_total[None,:,:] * path[None,:,:]
-             # the equation above is a theoretical model based on standard Rayleigh scattering principles.
+            tau_scat = R_mean * N_total * path
+            # the equation above is a theoretical model based on standard Rayleigh scattering principles.
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
             [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
             '''
-            l.info("mean r_scatter: %f", np.mean(r_scatter))  
             tau_tot  = tau_scat + tau_abs
-            l.info("mean tau_tot: %f", np.mean(tau_tot))
-            omega0 = tau_scat / tau_tot
             F_dir   = τ 
             g  = 0.0
-            flux_diffuse =  (I0 * cos_zenith) \
-            * (omega0 / (2*(1 - omega0*g))) \
-            * (1 - np.exp(-tau_tot / cos_zenith))
+            tau_ext = N_total * air_mass_temp * np.mean(s_tot)  # crude band‐mean
+            omega0  = (N_total * air_mass_temp * R_mean) / tau_ext
+            flux_diffuse  = I0 * cos_zenith * (omega0/(2*(1-omega0*g))) * (1 - np.exp(-tau_ext/cos_zenith))
             '''formulation derived from two-stream radiative transfer approximations.
             citation: [1] P. J. Webster and R. Lukas, “Tropical ocean-atmosphere interaction:
             The role of clouds in the radiative feedback,” J. Atmos. Sci., vol. 37, no. 3, pp. 630-
