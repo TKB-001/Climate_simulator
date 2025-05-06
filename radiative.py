@@ -166,6 +166,8 @@ class Irradiance:
         }
         alpha_arrays = [alpha for alpha, nu in cs.values()]
         s_tot = np.sum(alpha_arrays, axis=0).astype(np.float32)
+        abs_stack = np.stack(alpha_arrays, axis=0)
+
         l.info("Mean temp: %f",scalar_temp )
 
         def step(current_time):
@@ -187,10 +189,11 @@ class Irradiance:
             H_atmosphere = (8.314*temp)/(G*molar_mass)
 
             air_mass_temp = (np.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * np.sin(zenith))**2) - exoplanet_R * np.cos(zenith)) * 100.0
-            tau_abs = np.zeros_like(ND[next(iter(ND))])
             path = air_mass_temp/100
-            for gas, alpha_val in alpha_targeted.items():
-                tau_abs += alpha_val * ND[gas] * path
+            abs_stack_px = abs_stack[:,:,None,None]  
+            nd_vec = np.array([ND[gas] for gas in alpha_targeted])    # (n_g, n_w, 1, 1)
+            nd_px        = nd_vec[:,None,:,:]           # (n_g, 1, Y, X)
+            tau_abs = np.sum(abs_stack_px * nd_px, axis=0) * path[None,:,:]
             r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec)
             scale = (R_star / r_t)**2 
             I_star = I_star * scale
@@ -200,17 +203,17 @@ class Irradiance:
             except Exception:    
                 τ = compute_tau(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 1000)
             l.info("mean τ: %f", np.mean(τ))
-            r_scatter = ((24 * np.pi**3 / λ**4) * (L_total**2) * ((6+3*depolarization)/(6-7*depolarization))) * N_total  
+            r_scatter = ((24 * np.pi**3 / v**4) * (L_total**2) * ((6+3*depolarization)/(6-7*depolarization))) * N_total  
+            tau_scat = r_scatter[:,None,None] * N_total[None,:,:] * path[None,:,:]
              # the equation above is a theoretical model based on standard Rayleigh scattering principles.
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
             [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
             '''
             l.info("mean r_scatter: %f", np.mean(r_scatter))  
-            tau_scat = r_scatter * N_total * air_mass_temp
             tau_tot  = tau_scat + tau_abs
             l.info("mean tau_tot: %f", np.mean(tau_tot))
             omega0 = tau_scat / tau_tot
-            F_dir = I0 * cos_zenith * np.exp(-tau_tot / cos_zenith)
+            F_dir   = τ 
             g  = 0.0
             flux_diffuse =  (I0 * cos_zenith) \
             * (omega0 / (2*(1 - omega0*g))) \
