@@ -195,10 +195,6 @@ class Irradiance:
 
             air_mass_temp = (np.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * np.sin(zenith))**2) - exoplanet_R * np.cos(zenith)) * 100.0
             path = air_mass_temp/100
-            abs_stack_px = abs_stack[:,:,None,None]  
-            nd_vec = np.array([ND[gas] for gas in alpha_targeted])    # (n_g, n_w, 1, 1)
-            nd_px        = nd_vec[:,None,:,:]           # (n_g, 1, Y, X)
-            tau_abs = np.sum(abs_stack_px * nd_px, axis=0) * path[None,:,:]
             r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec)
             scale = (R_star / r_t)**2 
             I_star = I_star * scale
@@ -212,10 +208,9 @@ class Irradiance:
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
             [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
             '''
-            tau_tot  = tau_scat + tau_abs
             F_dir   = τ 
             g  = 0.0
-            tau_ext = N_total * air_mass_temp * np.mean(s_tot)  # crude band‐mean
+            tau_ext = N_total * air_mass_temp * np.mean(s_tot)  
             omega0  = (N_total * air_mass_temp * R_mean) / tau_ext
             flux_diffuse  = I0 * cos_zenith * (omega0/(2*(1-omega0*g))) * (1 - np.exp(-tau_ext/cos_zenith))
             '''formulation derived from two-stream radiative transfer approximations.
@@ -250,5 +245,6 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
+
 
 
