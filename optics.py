@@ -112,7 +112,8 @@ def get_abscoef(
         OmegaGrid=wavenumbers,
         Environment={'T': temperature, 'p': total_pressure, 'p_self': self_pressure},
         WavenumberStep=wavenumber_step,
-        GammaL=gammaL
+        GammaL=gammaL,
+        HITRAN_units=False
     )
     return alpha, nu
 
@@ -166,10 +167,9 @@ def start():
                 n = None
             else:
                 n = np.real(n)
-    return N_total, L_total, PP
+    return N_total, L_total, PP, ND
 
 def initialize_wavenumbers():
     wavenumbers = pd.DataFrame({"nu": np.linspace(50, 3500, 350000)})
     wavenumbers["inpower"]= wavenumbers.nu.apply(lambda x: planckWNCM(x, np.mean(t)))  
     return wavenumbers
-   
