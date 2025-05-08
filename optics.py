@@ -96,7 +96,7 @@ def get_abscoef(
     Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)),
                   ('>=', 'sw', intensity_cutoff))    
     try:
-        h.select(gas_name, Conditions=Cond, DestinationTableName='filtered')
+        h.select(gas_name, Conditions=Cond, DestinationTableName=f"{gas_name}_filtered")
     except Exception:
         try:
             h.fetch(gas_name,isoto_numbers[gas_name],1,min(wavenumbers),max(wavenumbers), Parameters=['nu', 'Sw'])
@@ -104,11 +104,16 @@ def get_abscoef(
             l.exception(f"Failed to fetch data for {gas_name} (isotope {isoto_numbers[gas_name]}): {e}")
             h.fetch(gas_name,isoto_numbers[gas_name],1,min(wavenumbers),max(wavenumbers))
             Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)))
-            h.select(gas_name, Conditions=Cond, DestinationTableName='filtered')
-             
+            h.select(gas_name, Conditions=Cond, DestinationTableName=f"{gas_name}_filtered")
+    
+    if h.tableSize(f"{gas_name}_filtered") == 0:
+        l.DEBUG(f"No data above intensity_cutoff for {gas_name}. Fetching full spectra.")
+        h.fetch(gas_name, isoto_numbers[gas_name], 1, min(wavenumbers), max(wavenumbers))
+        Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)))
+        h.select(gas_name, Conditions=Cond, DestinationTableName=f"{gas_name}_filtered")
 
     alpha, nu = h.absorptionCoefficient_Voigt(
-        SourceTables='filtered',
+        SourceTables=f"{gas_name}_filtered",
         OmegaGrid=wavenumbers,
         Environment={'T': temperature, 'p': total_pressure, 'p_self': self_pressure},
         WavenumberStep=wavenumber_step,
