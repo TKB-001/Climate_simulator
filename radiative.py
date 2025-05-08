@@ -161,10 +161,10 @@ class Irradiance:
         v = wavenumbers["nu"].to_numpy()   
         k = np.argmin(np.abs(v - v_target))
         alpha_targeted = { 
-        gas: alpha[k] 
+        gas: (alpha * 1e-4)[k] 
         for (gas, (alpha, nu)) in cs.items()
         }
-        alpha_arrays = [alpha for alpha, nu in cs.values()]
+        alpha_arrays = [(alpha * 1e-4) for alpha, nu in cs.values()]
         s_abs   = np.sum(alpha_arrays, axis=0).astype(np.float32)
         lambda_m   = 1.0/(v*100.0)
         r_scatter =     24 * np.pi**3* polarizability_mol**2* (6 + 3 * depolarization)/ (6 - 7 * depolarization) / (lambda_m**4)  
