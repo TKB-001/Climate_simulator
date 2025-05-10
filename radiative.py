@@ -178,19 +178,17 @@ class Irradiance:
         v = wavenumbers["nu"].to_numpy()   
         k = np.argmin(np.abs(v - v_target))
         alpha_targeted = { 
-        gas: (alpha * 1e-4)[k] 
+        gas: (alpha / 1e-4)[k] 
         for (gas, (alpha, nu)) in cs.items()
         }
-        alpha_arrays = [(alpha * 1e-4) for alpha, nu in cs.values()]
+        alpha_arrays = [(alpha / 1e-4) for alpha, nu in cs.values()]
         s_abs   = np.sum(alpha_arrays, axis=0).astype(np.float32)
         lambda_m   = 1.0/(v*100.0)
         r_scatter =     24 * np.pi**3* polarizability_mol**2* (6 + 3 * depolarization)/ (6 - 7 * depolarization) / (lambda_m**4)  
         s_tot = (s_abs + r_scatter).astype(np.float32)  
         R_mean = np.mean(r_scatter)
-        R_mean *= 1e-4
-        abs_stack = np.stack(alpha_arrays, axis=0)
-
-        l.info("Mean temp: %f",scalar_temp )
+        R_mean /= 1e-4
+        l.info("Mean temp: %f", scalar_temp)
 
         def step(current_time):
             global I_star, N_total, L_total, PP
@@ -262,6 +260,3 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
-
-
-
