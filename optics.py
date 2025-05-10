@@ -7,6 +7,7 @@ from chemistry import begin
 from chemicals import permittivity
 import pygame
 
+
 pygame.init()
 
 l.basicConfig(
@@ -94,7 +95,7 @@ def get_abscoef(
     ):
 
     Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)),
-                  ('>=', 'sw', intensity_cutoff))    
+                  ('>=', 'Sw', intensity_cutoff))    
     try:
         h.select(gas_name, Conditions=Cond, DestinationTableName=f"{gas_name}_filtered")
     except Exception:
@@ -105,8 +106,8 @@ def get_abscoef(
             h.fetch(gas_name,isoto_numbers[gas_name],1,min(wavenumbers),max(wavenumbers))
             Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)))
             h.select(gas_name, Conditions=Cond, DestinationTableName=f"{gas_name}_filtered")
-    
-    if len(h.LOCAL_TABLE_CACHE.get(f"{gas_name}_filtered", {}).get("data", [])) == 0:
+    nu_vals = h.getColumn(f"{gas_name}_filtered", 'nu')
+    if len(nu_vals) == 0:
         l.DEBUG(f"No data above intensity_cutoff for {gas_name}. Fetching full spectra.")
         h.fetch(gas_name, isoto_numbers[gas_name], 1, min(wavenumbers), max(wavenumbers))
         Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)))
