@@ -6,13 +6,12 @@ import math
 from config import *
 import logging as l
 from chemistry import depolarization
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from interplanetary import orbital_distance
 
 t = calculate_temperature(albedo_map, 1)
 l.basicConfig(
-
-    filename='radiative.log', 
+    filename='radiative.log',
     level=l.INFO,
     filemode='a',
     format='%(asctime)s - %(levelname)s - %(message)s' 
@@ -112,10 +111,28 @@ def compute_tau( N_total, air_mass, s_tot, I_star, v, cos_zenith, chunk_size):
         return τ
 
 def aboscf():
-        cs = {}
-        for compound, Pi in PP.items():
-            cs[compound] = get_abscoef(compound, wavenumbers["nu"].to_numpy(), np.mean(t) , P, Pi)
-        return cs
+    cs = {}
+    nu = wavenumbers["nu"].to_numpy()
+    args = [
+        (compound, nu, np.mean(t), P, Pi)
+        for compound, Pi in PP.items()
+    ]
+    with ThreadPoolExecutor(max_workers=4) as exe:
+        futures = {
+            exe.submit(get_abscoef, *arg): arg[0]
+            for arg in args
+        }
+        for fut in as_completed(futures):
+            gas = futures[fut]
+            try:
+                alpha, nu_out = fut.result()
+            except Exception as e:
+                l.error(f"get_abscoef failed for {gas}: {e}")
+                alpha = np.zeros_like(nu)
+                nu_out = nu
+            cs[gas] = (alpha, nu_out)
+    return cs
+
 
 class Irradiance:
     def __init__(self):
@@ -169,8 +186,8 @@ class Irradiance:
         lambda_m   = 1.0/(v*100.0)
         r_scatter =     24 * np.pi**3* polarizability_mol**2* (6 + 3 * depolarization)/ (6 - 7 * depolarization) / (lambda_m**4)  
         s_tot = (s_abs + r_scatter).astype(np.float32)  
-        R_mean = np.mean(r_scatter) 
-
+        R_mean = np.mean(r_scatter)
+        R_mean *= 1e-4
         abs_stack = np.stack(alpha_arrays, axis=0)
 
         l.info("Mean temp: %f",scalar_temp )
