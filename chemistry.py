@@ -8,7 +8,7 @@ import numpy as np
 from pyscf.scf import addons 
 from chemicals import permittivity  
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 '''PySCF: Sun, Q., et al. (2018). PySCF: the Python-based simulations of chemistry framework. WIREs Computational Molecular Science.
@@ -106,12 +106,28 @@ def run_tddft(mf,
     return td
 
 def fetch_one(compound, isoto):
+    existing = h.tableList()
+    if compound in existing:
+        return compound, None
+
     try:
-        h.fetch(compound,isoto,1,1,3500, Parameters=['nu', 'sw']) 
+        try:
+            h.dropTable(compound)
+        except:
+            pass
+
+        h.fetch(
+            compound,
+            isoto,
+            1,
+            1,
+            3500,
+            Parameters=['nu', 'Sw']
+        )
         return compound, None
     except Exception as e:
-            l.exception(f"Failed to fetch data for {compound} (isotope {isoto}): {e}")
-            return compound, e
+        l.exception(f"Failed to fetch data for {compound} (isotope {isoto}): {e}")
+        return compound, e
 
 def begin():
     global isoto_numbers, cas_numbers, permittivity_data, depolarization
@@ -162,7 +178,7 @@ def begin():
     depolarization = (6*gamma**2)/((45*polarizability_mol**2)+(7*gamma **2))
 
     isoto_numbers = {gas: data['I'] for gas, data in GAS_CONFIG.items()}
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ProcessPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(fetch_one, compound, iso): compound
             for compound, iso in isoto_numbers.items()
@@ -173,6 +189,5 @@ def begin():
             if error is not None:
                 l.warning(f"Fetch failed for {compound} due to {error}")
     return isoto_numbers,  cas_numbers, permittivity_data, depolarization, polarizability_mol
-
 
 
