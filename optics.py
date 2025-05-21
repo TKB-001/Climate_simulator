@@ -84,15 +84,15 @@ def planckWNCM(v, T):
     return 100.0*np.pi*2.0*h*c*c*v*v*v/(np.exp(h*c*v/(kB*T))-1)
 
 def get_abscoef(
+    self_pressure: float,
     gas_name: str,
     wavenumbers: np.ndarray,
-    temperature: float = 288.0,
-    total_pressure: float = 1.0,
-    self_pressure: float = 0.0,
-    wavenumber_step: float = 0.01,
+    temperature: float = np.mean(t),
+    total_pressure: float = P,
+    wavenumber_step: float = 0.1,
     gammaL: str = 'gamma_air',
-    intensity_cutoff: float = 1e-19
-    ):
+    intensity_cutoff: float = 1e-17
+    ): 
 
     Cond = ('AND', ('BETWEEN', 'nu', min(wavenumbers), max(wavenumbers)),
                   ('>=', 'Sw', intensity_cutoff))    
@@ -175,7 +175,9 @@ def start():
                 n = np.real(n)
     return N_total, L_total, PP, ND
 
-def initialize_wavenumbers():
-    wavenumbers = pd.DataFrame({"nu": np.linspace(50, 3500, 350000)})
-    wavenumbers["inpower"]= wavenumbers.nu.apply(lambda x: planckWNCM(x, np.mean(t)))  
-    return wavenumbers
+def initialize_wavenumbers(step=0.1):
+    nu = np.arange(50, 3500+step, step)
+    inpower = planckWNCM(nu, np.mean(t))
+    return pd.DataFrame({"nu": nu, "inpower": inpower})
+
+
