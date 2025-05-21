@@ -7,6 +7,8 @@ import logging as l
 import numpy as np
 import pygame.surfarray as sa
 from optics import Map_image
+import faulthandler
+faulthandler.enable(all_threads=True)
 
 clock = pygame.time.Clock()
 pygame.init()
@@ -47,6 +49,7 @@ orbital_period_parts = (orbital_period_days*detla)/4
 generate(orbital_period_parts, 20, 250, cs)
 generate(orbital_period_parts*2, 20, 250, cs)
 generate(orbital_period_parts*1.5, 20, 250, cs)
+#generate(orbital_period_parts*2, 0, 1, cs)
 running = True
 current_map = 0
 start_time = pygame.time.get_ticks() 
