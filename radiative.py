@@ -6,12 +6,11 @@ import math
 from config import *
 import logging as l
 from chemistry import depolarization
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 from interplanetary import orbital_distance
 
 t = calculate_temperature(albedo_map, 1)
 l.basicConfig(
-    filename='radiative.log',
     level=l.INFO,
     filemode='a',
     format='%(asctime)s - %(levelname)s - %(message)s' 
@@ -82,7 +81,8 @@ def compute_tau_cuda_kernel( N_total, air_mass, s_tot, I_star, v, cos_zenith, ta
                         τk1 = a_ij * s_tot[k + 1]
                         Ik = I_star[k] * math.exp(-τk)
                         Ik1 = I_star[k + 1] * math.exp(-τk1)
-                        sum_ij += 0.5 * (Ik + Ik1) * (v[k + 1] - v[k])
+                        Δv = v[k+1] - v[k] 
+                        sum_ij += 0.5 * (Ik + Ik1) * Δv
 
                 tau_out[i, j] = sum_ij * cz
 
@@ -105,7 +105,8 @@ def compute_tau( N_total, air_mass, s_tot, I_star, v, cos_zenith, chunk_size):
                         τk1 = τ_vec[k - start + 1]
                         Ik = I_star[k] * np.exp(-τk)
                         Ik1 = I_star[k + 1] * np.exp(-τk1)
-                        sum_ij += 0.5 * (Ik + Ik1) * (v[k + 1] - v[k])
+                        Δv = v[k+1] - v[k]
+                        sum_ij += 0.5 * (Ik + Ik1) * Δv
                 τ[i, j] = sum_ij * cz
 
         return τ
@@ -117,7 +118,7 @@ def aboscf():
         (compound, nu, np.mean(t), P, Pi)
         for compound, Pi in PP.items()
     ]
-    with ThreadPoolExecutor(max_workers=4) as exe:
+    with ProcessPoolExecutor(max_workers=4) as exe:
         futures = {
             exe.submit(get_abscoef, *arg): arg[0]
             for arg in args
@@ -161,8 +162,6 @@ class Irradiance:
 
                 return d_tau_out.copy_to_host()
     def calculate_irradiance_time(self, time, time_range, samples, cs):
-        λ = np.float64(500e-9)
-        v_target = 1/(λ) / 100.0
         start_time = time - time_range
         end_time = time + time_range
 
@@ -175,17 +174,15 @@ class Irradiance:
 
         temp = t
         scalar_temp = np.mean(temp).item()
-        v = wavenumbers["nu"].to_numpy()   
-        k = np.argmin(np.abs(v - v_target))
-        alpha_targeted = { 
-        gas: (alpha / 1e-4)[k] 
-        for (gas, (alpha, nu)) in cs.items()
-        }
-        alpha_arrays = [(alpha / 1e-4) for alpha, nu in cs.values()]
-        s_abs   = np.sum(alpha_arrays, axis=0).astype(np.float32)
-        lambda_m   = 1.0/(v*100.0)
-        r_scatter =     24 * np.pi**3* polarizability_mol**2* (6 + 3 * depolarization)/ (6 - 7 * depolarization) / (lambda_m**4)  
-        s_tot = (s_abs + r_scatter).astype(np.float32)  
+        v = (wavenumbers["nu"].to_numpy())*100   #m^-1
+        alpha_arrays = [(alpha) for alpha, nu in cs.values()] #cm^-1
+        s_abs = np.sum(alpha_arrays, axis=0).astype(np.float32)* 100.0 #m^-1
+        lambda_m = 1.0/v
+        α_vol = polarizability_mol / (4*np.pi*8.8541878128e-12)
+
+        r_scatter = (24*np.pi**3 * α_vol**2 * (6+3*depolarization)/(6-7*depolarization)
+                    / lambda_m**4)
+        s_tot = (s_abs + r_scatter).astype(np.float32)
         R_mean = np.mean(r_scatter)
         R_mean /= 1e-4
         l.info("Mean temp: %f", scalar_temp)
@@ -209,22 +206,19 @@ class Irradiance:
             H_atmosphere = (8.314*temp)/(G*molar_mass)
 
             air_mass_temp = (np.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * np.sin(zenith))**2) - exoplanet_R * np.cos(zenith)) * 100.0
-            path = air_mass_temp/100
             r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec)
-            scale = (R_star / r_t)**2 
-            I_star = I_star * scale
+            scale = (R_star / r_t)**2
+            I_star_loc = I_star * scale
             try:
                 cuda.select_device(0)
-                τ = self.compute_tau_cuda(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 5000)
+                F_dir = self.compute_tau_cuda(N_total, air_mass_temp, s_tot, I_star_loc, v, cos_zenith, 5000)
             except Exception:    
-                τ = compute_tau(N_total, air_mass_temp, s_tot, I_star, v, cos_zenith, 1000)
-            tau_scat = R_mean * N_total * path
+                F_dir = compute_tau(N_total, air_mass_temp, s_tot, I_star_loc, v, cos_zenith, 1000)
             # the equation above is a theoretical model based on standard Rayleigh scattering principles.
             '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
             [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
             '''
-            F_dir   = τ 
-            g  = 0.0
+            g = 0.0
             tau_ext = N_total * air_mass_temp * np.mean(s_tot)  
             omega0  = (N_total * air_mass_temp * R_mean) / tau_ext
             flux_diffuse  = I0 * cos_zenith * (omega0/(2*(1-omega0*g))) * (1 - np.exp(-tau_ext/cos_zenith))
@@ -238,7 +232,6 @@ class Irradiance:
                 l.warning("Irradiance array contains NaN values")
             if np.isinf(irradiance_array).any():
                 l.warning("Irradiance array contains inf values")
-
             return irradiance_array
         results= []
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -260,3 +253,4 @@ class Irradiance:
 
         self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
         return self.array[:]
+
