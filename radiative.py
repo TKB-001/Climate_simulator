@@ -1,28 +1,30 @@
 import numpy as np
 import pygame
-from numba import prange, cuda, njit
-from optics import albedo_map, start, initialize_wavenumbers, get_abscoef, calculate_temperature, polarizability_mol
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from numba import cuda
+from optics import start, initialize_wavenumbers, get_abscoef, polarizability_mol, t, get_size
 import math
 from config import *
 import logging as l
 from chemistry import depolarization
-from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 from interplanetary import orbital_distance
+from numba.cuda import occupancy
 
-t = calculate_temperature(albedo_map, 1)
-l.basicConfig(
-    level=l.INFO,
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(message)s' 
-)
+
+l.basicConfig(filename='radiative.log', level=l.DEBUG, force=True)
+
 
 l.info('check')
 
 
 N_total, L_total, PP, ND  = start()
-wavenumbers = initialize_wavenumbers()
-I_star = wavenumbers["inpower"].to_numpy()
+wn = initialize_wavenumbers(0.1, nu_min, nu_max)
+I_star = wn["inpower"].to_numpy()   # W/m² per m⁻¹
+dv      = wn["dv_m"].to_numpy()     # m⁻¹ spacing
+v_m = wn["nu_m"].to_numpy()  
 L_star, R_exoplanet, R_star, rotation_period_sec, axial_tilt, orbital_period_sec = convert()
+
+H, W = get_size()
 
 
 def fill_water(surface, level, albedo_map):
@@ -36,19 +38,18 @@ def fill_water(surface, level, albedo_map):
     grayscale = np.dot(array[..., :3], [0.299, 0.587, 0.114])
 
     mask = grayscale < level
-    new_size = (grayscale.shape[0], grayscale.shape[1]) 
 
-    albedo_255 = (albedo_map * 255).astype(np.uint8)
+    albedo_255 = (albedo_map * 255)
     if albedo_255.ndim == 2:
         albedo_255 = np.stack((albedo_255,)*3, axis=-1)
     albedo_surface = pygame.surfarray.make_surface(albedo_255)
-    resized_albedo_surface = pygame.transform.smoothscale(albedo_surface, new_size)
+    resized_albedo_surface = pygame.transform.smoothscale(albedo_surface, (200, 200))
     resized_albedo = pygame.surfarray.array3d(resized_albedo_surface).astype(np.float32) / 255.0
     resized_albedo_gray = np.dot(resized_albedo[..., :3], [0.299, 0.587, 0.114])
     
 
     water_condition = mask
-    ice_condition = resized_albedo_gray >= 0.6
+    ice_condition = (resized_albedo_gray >= 0.5)  &  (resized_albedo_gray <= 0.7)
     array[water_condition] = [0, 0, 255]  
     array[ice_condition] = [255, 255, 255]  
 
@@ -59,68 +60,86 @@ def fill_water(surface, level, albedo_map):
 
 
 
+@cuda.jit(fastmath=True)
+def step_kernel( latitudes,longitudes, temp, v, s_tot, R_mean, axial_tilt, orbital_period_days
+                , rotation_period_sec, radiance, G,molar_mass, exoplanet_R, N_total, I_star, I_star_loc, time_steps, R_star,
+                orbital_period_sec, eccentricity, R_exoplanet):
+    ''' the code for calculating flux_diffuse above is a theoretical model based on standard Rayleigh scattering principles,
+      and the code for direct flux is derived from two-stream radiative transfer approximations.'''
+    
+    '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications,"
+    Optics Letters, vol. 29, no. 22, pp. 2620-2622, Nov. 2004.
+    [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36,
+    no. 10, pp. 2843-2852, Oct. 2019.
+    [3] P. J. Webster and R. Lukas, “Tropical ocean-atmosphere interaction:
+    The role of clouds in the radiative feedback,” J. Atmos. Sci., vol. 37, no. 3, pp. 630-
+    643, Mar. 1980. [Online]. Available: https://journals.ametsoc.org/view/journals/atsc/37/3/1520-0469_1980_037_0630_tsatrt_2_0_co_2.xml'''
+    h, w = cuda.grid(ndim=2)
+    H, W = radiance.shape
+    if h >= H or w >= W:
+        return
+    for idx in range(time_steps.size):
+        current_time = time_steps[idx]
+        r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec) #device function
+        scale = (R_star / r_t)**2
+        days_since_start = current_time / (24 * 3600)
+        eps = 1e-8
+        declination = axial_tilt * math.sin(2 * math.pi * days_since_start / orbital_period_days) 
+
+        lat = latitudes[h]
+        lon = longitudes[w]
+        hour_angle = 2 * math.pi * ((current_time % rotation_period_sec) / rotation_period_sec) + lon
+        cos_zenith = (
+            math.sin(lat) * math.sin(declination)
+            + math.cos(lat) * math.cos(declination) * math.cos(hour_angle)
+        )
+        if cos_zenith < 0:
+            cos_zenith= 0
+        zenith = math.acos(cos_zenith)
+
+        H_atmosphere = (8.314*temp[h, w])/(G*molar_mass)
+
+        air_mass_temp = (math.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * math.sin(zenith))**2) - exoplanet_R * math.cos(zenith)) * 100.0        
+        g = 0.0 
+        a_ij = N_total[h, w] * air_mass_temp
+        cz = cos_zenith
+
+        local_flux = 0.0
+        sum_tau    = 0.0
+
+        for k in range(v.size - 1):
+            I_star_loc= I_star[k] * scale
+            dv = v[k+1] - v[k]
+
+            τ   = a_ij * s_tot[k] #[3]
+
+            ω0  = (a_ij * R_mean) / (τ + eps) 
+            denom = max(2.0 * (1.0 - ω0 * g), eps) 
+            x     = τ / (cz + eps) 
+            two_term = (ω0 / denom) * (1.0 - math.exp(-x)) 
+            local_flux += I_star_loc * cz * two_term * dv 
+
+            τk   = a_ij * s_tot[k] #Beer–Lambert law ([1] & [2])
+            τk1  = a_ij * s_tot[k+1] 
+            Ik   = I_star[k] * math.exp(-τk / cz)
+            Ik1  = I_star[k+1] * math.exp(-τk1 / cz)
+            sum_tau += 0.5 * (Ik + Ik1) * dv * cz
+
+        total_width = v[-1] - v[0] 
+        radiance[h, w] = (local_flux+sum_tau * cz)/ total_width
 
 
-@cuda.jit
-def compute_tau_cuda_kernel( N_total, air_mass, s_tot, I_star, v, cos_zenith, tau_out, chunk_size):
-                i, j = cuda.grid(2)
-                lat, lon = N_total.shape
-                n = v.shape[0]
-
-                if i >= lat or j >= lon:
-                    return
-
-                a_ij = N_total[i, j] * air_mass[i, j]
-                cz = cos_zenith[i, j]
-                sum_ij = 0.0
-
-                for start in range(0, n - 1, chunk_size):
-                    end = min(start + chunk_size + 1, n)
-                    for k in range(start, end - 1):
-                        τk = a_ij * s_tot[k]
-                        τk1 = a_ij * s_tot[k + 1]
-                        Ik = I_star[k] * math.exp(-τk)
-                        Ik1 = I_star[k + 1] * math.exp(-τk1)
-                        Δv = v[k+1] - v[k] 
-                        sum_ij += 0.5 * (Ik + Ik1) * Δv
-
-                tau_out[i, j] = sum_ij * cz
-
-@njit(parallel=True, fastmath=True)
-def compute_tau( N_total, air_mass, s_tot, I_star, v, cos_zenith, chunk_size): 
-        lat, lon = N_total.shape
-        A = (N_total * air_mass).astype(np.float32)
-        n = v.shape[0]
-        τ = np.zeros((lat, lon), dtype=np.float32)
-        for i in prange(lat):
-            for j in range(lon):
-                a_ij = A[i, j]
-                cz = cos_zenith[i, j]
-                sum_ij = 0.0
-                for start in range(0, n - 1, chunk_size):
-                    end = min(start + chunk_size + 1, n)
-                    τ_vec = a_ij * s_tot[start:end]
-                    for k in range(start, end - 1):
-                        τk = τ_vec[k - start]
-                        τk1 = τ_vec[k - start + 1]
-                        Ik = I_star[k] * np.exp(-τk)
-                        Ik1 = I_star[k + 1] * np.exp(-τk1)
-                        Δv = v[k+1] - v[k]
-                        sum_ij += 0.5 * (Ik + Ik1) * Δv
-                τ[i, j] = sum_ij * cz
-
-        return τ
 
 def aboscf():
     cs = {}
-    nu = wavenumbers["nu"].to_numpy()
+    nu = wn["dv_m"].to_numpy()
     args = [
         (compound, nu, np.mean(t), P, Pi)
         for compound, Pi in PP.items()
     ]
     with ProcessPoolExecutor(max_workers=4) as exe:
         futures = {
-            exe.submit(get_abscoef, *arg): arg[0]
+            exe.submit(get_abscoef, t,  *arg): arg[0]
             for arg in args
         }
         for fut in as_completed(futures):
@@ -135,122 +154,123 @@ def aboscf():
     return cs
 
 
+
 class Irradiance:
     def __init__(self):
         self.array = np.zeros((200, 200, 3), dtype=np.uint8)
+        self.d_radiance = cuda.device_array((H,W), dtype=np.float32)
+        self.d_I_star_loc = cuda.device_array((H,W), dtype=np.float32)
 
-    def compute_tau_cuda(self, N_total, air_mass, s_tot, I_star, v, cos_zenith, chunk_size):
-                lat, lon = N_total.shape
+    def compute_flux(self,H, W,s_tot,R_mean,v, latitudes, longitudes, temp
+        ,d_N_total, d_I_star, time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, bmax):
+        
+        threadsperblock = (bmax, bmax)
+   
+        blockspergrid = (
+            (H + threadsperblock[0] - 1) // threadsperblock[0],
+            (W + threadsperblock[1] - 1) // threadsperblock[1]
+        )
 
-                tau_out = np.zeros((lat, lon), dtype=np.float32)
 
-                d_N_total = cuda.to_device(N_total.astype(np.float32))
-                d_air_mass = cuda.to_device(air_mass.astype(np.float32))
-                d_s_tot = cuda.to_device(s_tot.astype(np.float32))
-                d_I_star = cuda.to_device(I_star.astype(np.float32))
-                d_v = cuda.to_device(v.astype(np.float32))
-                d_cos_zenith = cuda.to_device(cos_zenith.astype(np.float32))
-                d_tau_out = cuda.device_array_like(tau_out)
+        step_kernel[blockspergrid, threadsperblock]( 
+            latitudes, longitudes, temp, v, s_tot, R_mean, np.float32(axial_tilt), np.float32(orbital_period_days)
+            , np.float32(rotation_period_sec), self.d_radiance, np.float32(G),np.float32(molar_mass), np.float32(exoplanet_R), d_N_total, d_I_star, self.d_I_star_loc,
+            time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet
 
-                threadsperblock = (16, 16)
-                blockspergrid_x = math.ceil(lat / threadsperblock[0])
-                blockspergrid_y = math.ceil(lon / threadsperblock[1])
+        )
 
-                compute_tau_cuda_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
-                    d_N_total, d_air_mass, d_s_tot, d_I_star, d_v, d_cos_zenith, d_tau_out, chunk_size
-                )
+        flux = self.d_radiance.copy_to_host()
+        return flux
+    def step(self, longitudes,d_longitudes,
+              latitudes,d_latitudes, temp,d_temp, s_tot,d_s_tot, v,
+                d_v, R_mean, d_R_mean, I_star, d_I_star,N_total, d_N_total, time_steps, R_star,
+                orbital_period_sec, eccentricity, R_exoplanet, bmax):
 
-                return d_tau_out.copy_to_host()
+        cuda.select_device(0)
+        irradiance_array = self.compute_flux(H, W, d_s_tot, d_R_mean,d_v, d_latitudes, d_longitudes, d_temp, d_N_total, I_star, time_steps, R_star,
+                                              orbital_period_sec, eccentricity, R_exoplanet, bmax)  
+        # H, W,s_tot,R_mean,v, current_time, latitudes, longitudes, temp
+
+    
+        l.info("mean total_irradiance: %f", np.mean(irradiance_array))
+        if np.isnan(irradiance_array).any():
+            l.warning("Irradiance array contains NaN values")
+        if np.isinf(irradiance_array).any():
+            l.warning("Irradiance array contains inf values")
+        return irradiance_array
+
+
     def calculate_irradiance_time(self, time, time_range, samples, cs):
+        global v_m, I_star, N_total, axial_tilt, orbital_period_days, rotation_period_sec, G, molar_mass, exoplanet_R, R_exoplanet, eccentricity, orbital_period_sec
         start_time = time - time_range
         end_time = time + time_range
 
         time_steps = np.linspace(start_time, end_time, samples)
 
-        I0 = L_star / (4 * np.pi * R_exoplanet**2)
         latitudes = np.linspace(-np.pi/2, np.pi/2, 200)
         longitudes = np.radians(np.linspace(-180, 180, 200))
         total_irradiance = np.zeros((200, 200))
 
         temp = t
-        scalar_temp = np.mean(temp).item()
-        v = (wavenumbers["nu"].to_numpy())*100   #m^-1
+        temp = np.clip(temp, 50.0, 350.0) 
         alpha_arrays = [(alpha) for alpha, nu in cs.values()] #cm^-1
-        s_abs = np.sum(alpha_arrays, axis=0).astype(np.float32)* 100.0 #m^-1
-        lambda_m = 1.0/v
-        α_vol = polarizability_mol / (4*np.pi*8.8541878128e-12)
+        s_abs = np.sum(alpha_arrays, axis=0).astype(np.float32) #cm^-1
+        lambda_m = 1.0/v_m
+        α_vol = np.mean(polarizability_mol) / (4*np.pi*8.8541878128e-12)
 
-        r_scatter = (24*np.pi**3 * α_vol**2 * (6+3*depolarization)/(6-7*depolarization)
+        depol_val = np.asarray(depolarization, dtype=np.float32)
+        depol_safe = np.clip(depol_val, 0, 6.0/7.0 - 1e-6)
+        r_scatter = (24*np.pi**3 * α_vol**2 * (6+3*depol_safe)/(6-7*depol_safe)
                     / lambda_m**4)
-        s_tot = (s_abs + r_scatter).astype(np.float32)
+        s_tot = (s_abs + r_scatter)
         R_mean = np.mean(r_scatter)
         R_mean /= 1e-4
-        l.info("Mean temp: %f", scalar_temp)
-
-        def step(current_time):
-            global I_star, N_total, L_total, PP
-            days_since_start = current_time / (24 * 3600)
-
-            declination = axial_tilt * np.sin(2 * np.pi * days_since_start / orbital_period_days)
-
-            hour_angles = 2 * np.pi * ((current_time % rotation_period_sec) / rotation_period_sec) + longitudes[None, :]
-            cos_zenith = (
-                np.sin(latitudes[:, None]) * np.sin(declination)
-                + np.cos(latitudes[:, None])
-                * np.cos(declination)
-                * np.cos(hour_angles)
-            )
-            cos_zenith[cos_zenith < 0] = 0
-            zenith = np.acos(cos_zenith)
-
-            H_atmosphere = (8.314*temp)/(G*molar_mass)
-
-            air_mass_temp = (np.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * np.sin(zenith))**2) - exoplanet_R * np.cos(zenith)) * 100.0
-            r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec)
-            scale = (R_star / r_t)**2
-            I_star_loc = I_star * scale
-            try:
-                cuda.select_device(0)
-                F_dir = self.compute_tau_cuda(N_total, air_mass_temp, s_tot, I_star_loc, v, cos_zenith, 5000)
-            except Exception:    
-                F_dir = compute_tau(N_total, air_mass_temp, s_tot, I_star_loc, v, cos_zenith, 1000)
-            # the equation above is a theoretical model based on standard Rayleigh scattering principles.
-            '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications," Optics Letters, vol. 29, no. 22, pp. 2620–2622, Nov. 2004.
-            [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36, no. 10, pp. 2843–2852, Oct. 2019.
-            '''
-            g = 0.0
-            tau_ext = N_total * air_mass_temp * np.mean(s_tot)  
-            omega0  = (N_total * air_mass_temp * R_mean) / tau_ext
-            flux_diffuse  = I0 * cos_zenith * (omega0/(2*(1-omega0*g))) * (1 - np.exp(-tau_ext/cos_zenith))
-            '''formulation derived from two-stream radiative transfer approximations.
-            citation: [1] P. J. Webster and R. Lukas, “Tropical ocean-atmosphere interaction:
-            The role of clouds in the radiative feedback,” J. Atmos. Sci., vol. 37, no. 3, pp. 630-
-            643, Mar. 1980. [Online]. Available: https://journals.ametsoc.org/view/journals/atsc/37/3/1520-0469_1980_037_0630_tsatrt_2_0_co_2.xml'''
-            l.info("mean flux_diffuse: %f", np.mean(flux_diffuse))
-            irradiance_array = F_dir + flux_diffuse
-            if np.isnan(irradiance_array).any():
-                l.warning("Irradiance array contains NaN values")
-            if np.isinf(irradiance_array).any():
-                l.warning("Irradiance array contains inf values")
-            return irradiance_array
         results= []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(lambda current_time: step(current_time), current_time) for current_time in time_steps]
-            for f in futures:
-                result = f.result()
-                results.append(result)
-        total_irradiance =  sum(results)
+
+
+
+        R_mean = np.float32(R_mean)
+        axial_tilt = np.float32(axial_tilt)
+        orbital_period_days = np.float32(orbital_period_days)
+        rotation_period_sec = np.float32(rotation_period_sec)
+        G = np.float32(G)
+        molar_mass = np.float32(molar_mass)
+        exoplanet_R= np.float32(exoplanet_R)
+        d_R_mean= np.float32(R_mean)  
+        R_exoplanet = np.float32(R_exoplanet) 
+        eccentricity, orbital_period_sec = np.float32(eccentricity), np.float32(orbital_period_sec)
+
+        d_N_total=cuda.to_device(N_total.astype(np.float32))
+
+        d_s_tot= cuda.to_device(s_tot.astype(np.float32))
+        d_v= cuda.to_device(v_m.astype(np.float32))
+        d_temp = cuda.to_device(temp.astype(np.float32))
+        d_longitudes, d_latitudes = cuda.to_device(longitudes.astype(np.float32)), cuda.to_device(latitudes.astype(np.float32))    
+        d_I_star = cuda.to_device(I_star.astype(np.float32))
+        time_steps = cuda.to_device(time_steps.astype(np.float32))
+        bmin, bmax = occupancy_max_potential_block_size(step_kernel, [H, W, d_s_tot, d_R_mean,d_v, d_latitudes, d_longitudes, d_temp, d_N_total, I_star, time_steps, R_star,
+                                              orbital_period_sec, eccentricity, R_exoplanet])
+        total_irradiance = self.step(longitudes,d_longitudes, latitudes,d_latitudes,
+                        temp, d_temp,s_tot,  d_s_tot,v_m, d_v, R_mean,
+                        d_R_mean, I_star, d_I_star, N_total, d_N_total, time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, bmax
+                        )
+
+
+            
 
         averaged_irradiance = total_irradiance / samples
 
-        print(np.max(averaged_irradiance) if np.max(averaged_irradiance) > 0 else 1)
-        print(np.min(averaged_irradiance) if np.min(averaged_irradiance) > 0 else 1)
+        max_irradiance = np.max(averaged_irradiance)
+        l.info("Max averaged irradiance: %f", max_irradiance)
+        l.info("Min averaged irradiance: %f", np.min(averaged_irradiance))
 
-        normalized_irradiance = averaged_irradiance / (np.max(averaged_irradiance) if np.max(averaged_irradiance) > 0 else 1)
+        normalized_irradiance = averaged_irradiance / (max_irradiance if max_irradiance > 0 else 1)
         r = np.clip(255 * (normalized_irradiance ** 1.0), 0, 255)
-        g = r
+        green = r
         b = r
 
-        self.array[:] = np.stack([r, g, b], axis=-1).astype(np.uint8)
+        self.array[:] = np.stack([r, green, b], axis=-1).astype(np.uint8)
         return self.array[:]
+
+
 
