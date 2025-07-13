@@ -2,31 +2,24 @@ import os
 from numpy import radians
 
 
-
 """citation for much of the planetary (earth) infomation: [1] NASA, "Earth Fact Sheet," NASA Solar System Exploration, Apr. 22, 2024.
  [Online]. Available: https://nssdc.gsfc.nasa.gov/planetary/factsheet/earthfact.html """
 
 '________EDITABLE_______'
-
 image_path = os.path.expanduser(r"42.png")
 BASIS = 'aug-cc-pVDZ'
 UNITS = "Angstrom"
-molar_mass = 28.97 #molar mass of the atmosphere
+molar_mass = 0.02897   #molar mass of the atmosphere in kg/mol
 WIDTH, HEIGHT = 800, 600
 caption = 'test'
-alpha = 200 
+alpha, map_res = 200, 200 
 detla= 1
-P = 1014  #atmosphereic pressure in mb
-L_star = 1
-R_star = 1
-R_exoplanet = 1
+P = 101400  #atmosphereic pressure in Si units
+L_star, R_star, R_exoplanet, exoplanet_R = 1, 1, 1, 1
 rotation_period = 24
-exoplanet_R = 1
 G = 9.82
-axial_tilt_degrees = 23.44
-orbital_period_days = 365.256
-map_res = 200
-eccentricity = 0.0167
+axial_tilt_degrees, orbital_period_days, eccentricity = 23.44, 365.256, 0.0167
+nu_min, nu_max =  1000, 30000
 
 #L_star = 0.24
 # Lsun
@@ -55,8 +48,8 @@ GAS_CONFIG= {
         'basis' : BASIS,     
         'unit' : UNITS,
         'cas_number' : '10024-97-2',
-        'I' : 4,  #HITRAN isotopologue number
-        'P' : 0.000337  , # partial pressure in mb
+        'I' : 1,  #HITRAN isotopologue number
+        'P' : 0.0337  , # partial pressure in Si units
         'weight' : 44.013,
     },
 
@@ -65,8 +58,8 @@ GAS_CONFIG= {
         'basis' : BASIS,
         'unit' : UNITS,
         'cas_number' : '74-82-8',
-        'I' : 6,
-        'P' : 0.0020,
+        'I' : 1,
+        'P' : 0.2,
         'weight' : 16.04, 
     },
 
@@ -76,7 +69,7 @@ GAS_CONFIG= {
         'unit' : UNITS,
         'cas_number': '10028-15-6',
         'I' : 1,
-        'P' : 0.000005,
+        'P' : 0.0005,
         'weight' : 48
     },
 
@@ -85,9 +78,9 @@ GAS_CONFIG= {
         'basis' : BASIS, 
         'unit' : UNITS,
         'cas_number': '124-38-9',
-        'I' : 2,
+        'I' : 1,
         'P' : 0.43,
-        'weight' : 44.009,
+        'weight' : 44.01,
     },
 
     'H2O' : {
@@ -97,7 +90,7 @@ GAS_CONFIG= {
         'cas_number': '7732-18-5',
         'I' : 1,
         'P' : 10.14, 
-        'weight' : 18.01528
+        'weight' : 18.015
     },
 
     'N2' : {
@@ -107,7 +100,7 @@ GAS_CONFIG= {
         'cas_number': '7727-37-9',
         'I' : 1,
         'P' : 792.7,
-        'weight' :  28.0134
+        'weight' : 28.013
     },
 
     'O2' : {
@@ -117,7 +110,7 @@ GAS_CONFIG= {
         'cas_number': '7782-44-7',
         'I' : 1,
         'P' : 212.4,
-        'weight' : 31.9988 
+        'weight' : 31.998
     },
     
                 }
@@ -133,7 +126,7 @@ R_sun_meters = 6.963e8
 initial_rotation_angle = 0
 declination=0
 R_earth_km = 6378 #[1] NASA, "Earth's Shape – Imagine the Universe!," NASA Goddard Space Flight Center. [Online]. Available: https://imagine.gsfc.nasa.gov/features/cosmic/earth_info.html. [Accessed: Apr. 24, 2025].
-
+eps = 1e-8
 
 def convert():
     global rotation_period_sec, axial_tilt,L_star, L_sun_watts, R_exoplanet, AU_to_meters, R_star, R_sun_meters, axial_tilt_degrees, rotation_period, detla, orbital_period_days
