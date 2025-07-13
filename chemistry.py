@@ -3,7 +3,7 @@ from pyscf.prop import polarizability
 from pyscf import tdscf
 import hapi as h
 import logging as l
-from config import GAS_CONFIG, os
+from config import GAS_CONFIG, os, eps
 import numpy as np
 from pyscf.scf import addons 
 from chemicals import permittivity  
@@ -18,15 +18,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
            DOI: 10.1016/j.jqsrt.2016.03.005'''
 
 
-l.basicConfig(
+l.basicConfig(filename='chemistry.log', level=l.DEBUG, force=True)
 
-    filename='chemistry.log', 
-    level=l.INFO,
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(message)s' 
-)
 
-l.info('check')
+l.info('check. Clean log using the command: grep -E "WARNING|ERROR|Exception:|mean flux_diffuse" chemistry_cleaned.log > important_chemistry.log')
 
 
 def RHF_obj(mol):
@@ -39,7 +34,7 @@ def RHF_obj(mol):
 def run_tddft(mf,
               nstates=10,
               ld_threshold=1e-6,
-              min_eig_cutoff=1e-8):
+              min_eig_cutoff=eps):
 
     mf = addons.remove_linear_dep_(mf, threshold=ld_threshold)
     mf.conv_tol = 1e-9
@@ -50,7 +45,7 @@ def run_tddft(mf,
     if isinstance(stab, bool):
         unstable = not stab
     else:
-        unstable = stab.min() < -1e-8
+        unstable = stab.min() < -eps
     if unstable:
         l.info("SCF unstable:re-optimizing with Newton")
         mf = scf.newton(mf).run()
@@ -175,7 +170,7 @@ def begin():
     alpha_perp = np.mean(evals[evals != np.max(evals)])
     polarizability_mol = (alpha_parallel+2*alpha_perp)/3
     gamma = alpha_parallel-alpha_perp
-    depolarization = (6*gamma**2)/((45*polarizability_mol**2)+(7*gamma **2))
+    depolarization = (6*gamma**2)/((45*polarizability_mol**2)+(7*gamma**2))
 
     isoto_numbers = {gas: data['I'] for gas, data in GAS_CONFIG.items()}
     with ProcessPoolExecutor(max_workers=4) as executor:
@@ -189,5 +184,7 @@ def begin():
             if error is not None:
                 l.warning(f"Fetch failed for {compound} due to {error}")
     return isoto_numbers,  cas_numbers, permittivity_data, depolarization, polarizability_mol
+
+
 
 
