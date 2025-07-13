@@ -1,7 +1,7 @@
 import pygame
 from config import *
-import radiative
-from radiative import Irradiance, fill_water, albedo_map, aboscf
+from radiative import Irradiance, fill_water, aboscf
+from optics import albedo_map
 import time
 import logging as l
 import numpy as np
@@ -20,14 +20,9 @@ irradiance_map.set_alpha(200)
 Map_image = fill_water(Map_image, 143, albedo_map)
 cs = aboscf()
 
-l.basicConfig(
+l.basicConfig(filename='executor.log', level=l.DEBUG, force=True)
 
-    filename='executor.log', 
-    level=l.INFO,
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(message)s' 
-)
-
+              
 l.info('check')
 pixel_maps = []
 def generate(t, time_range, samples, cs):
@@ -46,13 +41,13 @@ def generate(t, time_range, samples, cs):
     pixel_maps.append(frame)
 
 orbital_period_parts = (orbital_period_days*detla)/4
-generate(orbital_period_parts, 20, 250, cs)
-generate(orbital_period_parts*2, 20, 250, cs)
-generate(orbital_period_parts*1.5, 20, 250, cs)
-#generate(orbital_period_parts*2, 0, 1, cs)
-running = True
+#generate(orbital_period_parts, 20, 250, cs)
+#generate(orbital_period_parts*2, 20, 250, cs)
+#generate(orbital_period_parts*1.5, 20, 250, cs)
+generate(orbital_period_parts*2, 0, 1, cs)
 current_map = 0
-start_time = pygame.time.get_ticks() 
+start_time = pygame.time.get_ticks()
+running = True 
 while running:
     elapsed_time = (pygame.time.get_ticks() - start_time) / 1000
     screen_width, screen_height = screen.get_size()
@@ -63,6 +58,8 @@ while running:
         elif event.type == pygame.KEYDOWN:
             if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                 current_map = event.key - pygame.K_1
+            elif event.key == pygame.K_q:
+                running = False
 
 
 
