@@ -1,14 +1,28 @@
 import numpy as np
 import pygame
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from numba import cuda
+from numba import cuda, types, int64
 from optics import start, initialize_wavenumbers, get_abscoef, polarizability_mol, t, get_size
 import math
 from config import *
 import logging as l
 from chemistry import depolarization
 from interplanetary import orbital_distance
-from numba.cuda import occupancy
+from cuda.bindings.driver import cuOccupancyMaxPotentialBlockSize
+from numba.cuda.cudadrv.driver import driver as _drv, Linker as _RawLinker, Module
+from ctypes import byref, c_void_p, c_uint, c_int, c_char_p, POINTER, create_string_buffer, c_size_t
+import ctypes
+import re
+
+
+
+cudart = ctypes.CDLL("libnvrtc.so")
+
+cudart.cudaOccupancyMaxPotentialBlockSize.argtypes = [
+    ctypes.POINTER(c_int), ctypes.POINTER(c_int),
+    ctypes.c_void_p, c_size_t, c_int
+]
+cudart.cudaOccupancyMaxPotentialBlockSize.restype = c_int
 
 
 l.basicConfig(filename='radiative.log', level=l.DEBUG, force=True)
@@ -16,7 +30,7 @@ l.basicConfig(filename='radiative.log', level=l.DEBUG, force=True)
 
 l.info('check')
 
-
+cuda.select_device(0)
 N_total, L_total, PP, ND  = start()
 wn = initialize_wavenumbers(0.1, nu_min, nu_max)
 I_star = wn["inpower"].to_numpy()   # W/m² per m⁻¹
@@ -25,6 +39,7 @@ v_m = wn["nu_m"].to_numpy()
 L_star, R_exoplanet, R_star, rotation_period_sec, axial_tilt, orbital_period_sec = convert()
 
 H, W = get_size()
+
 
 
 def fill_water(surface, level, albedo_map):
@@ -58,77 +73,107 @@ def fill_water(surface, level, albedo_map):
     pygame.surfarray.blit_array(surface, np.transpose(array, (1, 0, 2)))  
     return surface
 
+def dummy_from_sig(sig):
+    """
+    Given a list of Numba types (sig), return a list of dummy values:
+      - For Float/Integer types: a NumPy scalar (1.0 or 1) with correct dtype.
+      - For Array types: a minimal (1x1x⋯) CUDA device array of correct dtype/layout.
+    """
+    dummies = []
+    for t in sig:
+        if isinstance(t, types.Float):
+            np_dtype = np.dtype(str(t))
+            dummies.append(np_dtype.type(1.0))
+        elif isinstance(t, types.Integer):
+            np_dtype = np.dtype(str(t))
+            dummies.append(np_dtype.type(1))
+        elif isinstance(t, types.Array):
+            np_dtype = np.dtype(str(t.dtype))
+            ndim    = t.ndim
+            order   = t.layout  
+            shape = (1,) * ndim
+            dev_arr = cuda.device_array(shape, dtype=np_dtype, order=order)
+            dummies.append(dev_arr)
+        else:
+            raise TypeError(f"Unsupported type in signature: {t}")
+    return dummies
 
+@cuda.jit
+def _noop(): pass
 
-@cuda.jit(fastmath=True)
-def step_kernel( latitudes,longitudes, temp, v, s_tot, R_mean, axial_tilt, orbital_period_days
-                , rotation_period_sec, radiance, G,molar_mass, exoplanet_R, N_total, I_star, I_star_loc, time_steps, R_star,
-                orbital_period_sec, eccentricity, R_exoplanet):
-    ''' the code for calculating flux_diffuse above is a theoretical model based on standard Rayleigh scattering principles,
-      and the code for direct flux is derived from two-stream radiative transfer approximations.'''
-    
-    '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications,"
-    Optics Letters, vol. 29, no. 22, pp. 2620-2622, Nov. 2004.
-    [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36,
-    no. 10, pp. 2843-2852, Oct. 2019.
-    [3] P. J. Webster and R. Lukas, “Tropical ocean-atmosphere interaction:
-    The role of clouds in the radiative feedback,” J. Atmos. Sci., vol. 37, no. 3, pp. 630-
-    643, Mar. 1980. [Online]. Available: https://journals.ametsoc.org/view/journals/atsc/37/3/1520-0469_1980_037_0630_tsatrt_2_0_co_2.xml'''
-    h, w = cuda.grid(ndim=2)
-    H, W = radiance.shape
-    if h >= H or w >= W:
-        return
-    for idx in range(time_steps.size):
-        current_time = time_steps[idx]
-        r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec) #device function
-        scale = (R_star / r_t)**2
-        days_since_start = current_time / (24 * 3600)
-        eps = 1e-8
-        declination = axial_tilt * math.sin(2 * math.pi * days_since_start / orbital_period_days) 
+_noop[1,1](); cuda.synchronize()
 
-        lat = latitudes[h]
-        lon = longitudes[w]
-        hour_angle = 2 * math.pi * ((current_time % rotation_period_sec) / rotation_period_sec) + lon
-        cos_zenith = (
-            math.sin(lat) * math.sin(declination)
-            + math.cos(lat) * math.cos(declination) * math.cos(hour_angle)
-        )
-        if cos_zenith < 0:
-            cos_zenith= 0
-        zenith = math.acos(cos_zenith)
+def make_step_kernel(H, W):
+    @cuda.jit(fastmath=True)
+    def step_kernel( latitudes,longitudes, temp, v, s_tot, R_mean, axial_tilt, orbital_period_days
+                    , rotation_period_sec, radiance, G,molar_mass, exoplanet_R, N_total, I_star, I_star_loc, time_steps, R_star,
+                    orbital_period_sec, eccentricity, R_exoplanet):
+        ''' the code for calculating flux_diffuse above is a theoretical model based on standard Rayleigh scattering principles,
+        and the code for direct flux is derived from two-stream radiative transfer approximations.'''
+        
+        '''References: [1] J. A. Sutton and J. F. Driscoll, "Rayleigh scattering cross sections of combustion species at 266, 355, and 532 nm for thermometry applications,"
+        Optics Letters, vol. 29, no. 22, pp. 2620-2622, Nov. 2004.
+        [2] Q. Wang, L. Jiang, W. Cai, and Y. Wu, "Study of UV Rayleigh scattering thermometry for flame temperature field measurement," J. Opt. Soc. Am. B, vol. 36,
+        no. 10, pp. 2843-2852, Oct. 2019.
+        [3] P. J. Webster and R. Lukas, “Tropical ocean-atmosphere interaction:
+        The role of clouds in the radiative feedback,” J. Atmos. Sci., vol. 37, no. 3, pp. 630-
+        643, Mar. 1980. [Online]. Available: https://journals.ametsoc.org/view/journals/atsc/37/3/1520-0469_1980_037_0630_tsatrt_2_0_co_2.xml'''
+        tx = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
+        h, w = cuda.grid(ndim=2)
+        if h >= H or w >= W or tx != 0:
+            return
+        idx = int64(0)
+        while idx < time_steps:
+            current_time = idx
+            r_t = orbital_distance(current_time, R_exoplanet, eccentricity, orbital_period_sec) #device function
+            scale = (R_star / r_t)**2
+            days_since_start = current_time / (24 * 3600)
+            eps = 1e-8
+            declination = axial_tilt * math.sin(2 * math.pi * days_since_start / orbital_period_days) 
 
-        H_atmosphere = (8.314*temp[h, w])/(G*molar_mass)
+            lat = latitudes[h]
+            lon = longitudes[w]
+            hour_angle = 2 * math.pi * ((current_time % rotation_period_sec) / rotation_period_sec) + lon
+            cos_zenith = (
+                math.sin(lat) * math.sin(declination)
+                + math.cos(lat) * math.cos(declination) * math.cos(hour_angle)
+            )
+            if cos_zenith < 0:
+                cos_zenith= 0
+            zenith = math.acos(cos_zenith)
 
-        air_mass_temp = (math.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * math.sin(zenith))**2) - exoplanet_R * math.cos(zenith)) * 100.0        
-        g = 0.0 
-        a_ij = N_total[h, w] * air_mass_temp
-        cz = cos_zenith
+            H_atmosphere = (8.314*temp[h, w])/(G*molar_mass)
 
-        local_flux = 0.0
-        sum_tau    = 0.0
+            air_mass_temp = (math.sqrt((exoplanet_R + H_atmosphere)**2 - (exoplanet_R * math.sin(zenith))**2) - exoplanet_R * math.cos(zenith)) * 100.0        
+            g = 0.0 
+            a_ij = N_total[h, w] * air_mass_temp
+            cz = cos_zenith
 
-        for k in range(v.size - 1):
-            I_star_loc= I_star[k] * scale
-            dv = v[k+1] - v[k]
+            local_flux = 0.0
+            sum_tau    = 0.0
 
-            τ   = a_ij * s_tot[k] #[3]
+            for k in range(v.size - 1):
+                I_star_loc= I_star[k] * scale
+                dv = v[k+1] - v[k]
 
-            ω0  = (a_ij * R_mean) / (τ + eps) 
-            denom = max(2.0 * (1.0 - ω0 * g), eps) 
-            x     = τ / (cz + eps) 
-            two_term = (ω0 / denom) * (1.0 - math.exp(-x)) 
-            local_flux += I_star_loc * cz * two_term * dv 
+                τ   = a_ij * s_tot[k] #[3]
 
-            τk   = a_ij * s_tot[k] #Beer–Lambert law ([1] & [2])
-            τk1  = a_ij * s_tot[k+1] 
-            Ik   = I_star[k] * math.exp(-τk / cz)
-            Ik1  = I_star[k+1] * math.exp(-τk1 / cz)
-            sum_tau += 0.5 * (Ik + Ik1) * dv * cz
+                ω0  = (a_ij * R_mean) / (τ + eps) 
+                denom = max(2.0 * (1.0 - ω0 * g), eps) 
+                x     = τ / (cz + eps) 
+                two_term = (ω0 / denom) * (1.0 - math.exp(-x)) 
+                local_flux += I_star_loc * cz * two_term * dv 
 
-        total_width = v[-1] - v[0] 
-        radiance[h, w] = (local_flux+sum_tau * cz)/ total_width
+                τk   = a_ij * s_tot[k] #Beer–Lambert law ([1] & [2])
+                τk1  = a_ij * s_tot[k+1] 
+                Ik   = I_star[k] * math.exp(-τk / cz)
+                Ik1  = I_star[k+1] * math.exp(-τk1 / cz)
+                sum_tau += 0.5 * (Ik + Ik1) * dv * cz
 
-
+            total_width = v[-1] - v[0] 
+            radiance[h, w] = (local_flux+sum_tau * cz)/ total_width
+            idx+=1
+    return step_kernel
 
 def aboscf():
     cs = {}
@@ -153,6 +198,28 @@ def aboscf():
             cs[gas] = (alpha, nu_out)
     return cs
 
+class MyLinker(_RawLinker):
+    def __init__(self,
+        max_registers=0,   
+        lineinfo=False,     
+        cc=_drv):
+        super().__init__(max_registers, lineinfo, cc)
+
+    def add_file(self, name, filename):
+        ptx = open(filename, "rb").read()
+        super().add_ptx(ptx, name)
+
+    def add_ptx(self, name: str, ptx_bytes):
+        super().add_ptx(ptx_bytes, name)
+
+    def complete(self):
+        cubin = super().complete()
+        return cubin, len(cubin)
+    def error_log(self):
+        return super().get_error_log()
+
+    def info_log(self):
+        return super().get_info_log()
 
 
 class Irradiance:
@@ -162,36 +229,32 @@ class Irradiance:
         self.d_I_star_loc = cuda.device_array((H,W), dtype=np.float32)
 
     def compute_flux(self,H, W,s_tot,R_mean,v, latitudes, longitudes, temp
-        ,d_N_total, d_I_star, time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, bmax):
-        
+        ,d_N_total, d_I_star, time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, bmax, kernel):
+        H, W = self.d_radiance.shape
+        H = np.int64(H); W = np.int64(W)
         threadsperblock = (bmax, bmax)
-   
+
         blockspergrid = (
             (H + threadsperblock[0] - 1) // threadsperblock[0],
             (W + threadsperblock[1] - 1) // threadsperblock[1]
         )
 
-
-        step_kernel[blockspergrid, threadsperblock]( 
+        kernel[blockspergrid, threadsperblock]( 
             latitudes, longitudes, temp, v, s_tot, R_mean, np.float32(axial_tilt), np.float32(orbital_period_days)
             , np.float32(rotation_period_sec), self.d_radiance, np.float32(G),np.float32(molar_mass), np.float32(exoplanet_R), d_N_total, d_I_star, self.d_I_star_loc,
-            time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet
-
-        )
+            time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, H, W)
 
         flux = self.d_radiance.copy_to_host()
         return flux
     def step(self, longitudes,d_longitudes,
               latitudes,d_latitudes, temp,d_temp, s_tot,d_s_tot, v,
                 d_v, R_mean, d_R_mean, I_star, d_I_star,N_total, d_N_total, time_steps, R_star,
-                orbital_period_sec, eccentricity, R_exoplanet, bmax):
+                orbital_period_sec, eccentricity, R_exoplanet, bmax, kernel):
 
-        cuda.select_device(0)
         irradiance_array = self.compute_flux(H, W, d_s_tot, d_R_mean,d_v, d_latitudes, d_longitudes, d_temp, d_N_total, I_star, time_steps, R_star,
-                                              orbital_period_sec, eccentricity, R_exoplanet, bmax)  
+                                              orbital_period_sec, eccentricity, R_exoplanet, bmax, kernel)  
         # H, W,s_tot,R_mean,v, current_time, latitudes, longitudes, temp
 
-    
         l.info("mean total_irradiance: %f", np.mean(irradiance_array))
         if np.isnan(irradiance_array).any():
             l.warning("Irradiance array contains NaN values")
@@ -199,13 +262,13 @@ class Irradiance:
             l.warning("Irradiance array contains inf values")
         return irradiance_array
 
-
     def calculate_irradiance_time(self, time, time_range, samples, cs):
-        global v_m, I_star, N_total, axial_tilt, orbital_period_days, rotation_period_sec, G, molar_mass, exoplanet_R, R_exoplanet, eccentricity, orbital_period_sec
+        global v_m, I_star, N_total, axial_tilt, orbital_period_days, rotation_period_sec, G, molar_mass, exoplanet_R, R_exoplanet, eccentricity, orbital_period_sec, H, W
         start_time = time - time_range
         end_time = time + time_range
 
         time_steps = np.linspace(start_time, end_time, samples)
+        time_steps = np.int64(time_steps.size)
 
         latitudes = np.linspace(-np.pi/2, np.pi/2, 200)
         longitudes = np.radians(np.linspace(-180, 180, 200))
@@ -225,9 +288,6 @@ class Irradiance:
         s_tot = (s_abs + r_scatter)
         R_mean = np.mean(r_scatter)
         R_mean /= 1e-4
-        results= []
-
-
 
         R_mean = np.float32(R_mean)
         axial_tilt = np.float32(axial_tilt)
@@ -239,24 +299,69 @@ class Irradiance:
         d_R_mean= np.float32(R_mean)  
         R_exoplanet = np.float32(R_exoplanet) 
         eccentricity, orbital_period_sec = np.float32(eccentricity), np.float32(orbital_period_sec)
-
         d_N_total=cuda.to_device(N_total.astype(np.float32))
 
         d_s_tot= cuda.to_device(s_tot.astype(np.float32))
-        d_v= cuda.to_device(v_m.astype(np.float32))
+        d_v= cuda.to_device(v_m.astype(np.float32))                                                         
         d_temp = cuda.to_device(temp.astype(np.float32))
         d_longitudes, d_latitudes = cuda.to_device(longitudes.astype(np.float32)), cuda.to_device(latitudes.astype(np.float32))    
         d_I_star = cuda.to_device(I_star.astype(np.float32))
-        time_steps = cuda.to_device(time_steps.astype(np.float32))
-        bmin, bmax = occupancy_max_potential_block_size(step_kernel, [H, W, d_s_tot, d_R_mean,d_v, d_latitudes, d_longitudes, d_temp, d_N_total, I_star, time_steps, R_star,
-                                              orbital_period_sec, eccentricity, R_exoplanet])
+        
+        kernel = make_step_kernel(H, W)
+        kernel[(1,1), (1,1)](
+                    latitudes,longitudes, temp, d_v, s_tot, R_mean, axial_tilt, orbital_period_days
+                    , rotation_period_sec, self.d_radiance, G,molar_mass, exoplanet_R, N_total, I_star, self.d_I_star_loc, time_steps, R_star,
+                    orbital_period_sec, eccentricity, R_exoplanet
+        )
+        module_handle = c_void_p()     
+        func_handle   = c_void_p()            
+        sig_types = list(kernel.signatures[0])
+        print("Before:", sig_types)
+        dummy_sig  = dummy_from_sig(sig_types)
+        sig_types = tuple(sig_types)
+        count = kernel.py_func.__code__.co_argcount
+        names = kernel.py_func.__code__.co_varnames[:count]
+        l.info(f"step_kernel sees {count} args: {names}")
+        kernel.specialize(*dummy_sig)
+        pyfunc = kernel.py_func
+        ptx, _ = cuda.compile_ptx_for_current_device(pyfunc, sig_types) 
+        linker = MyLinker()
+        linker.add_ptx(ptx.encode('ascii'), "step_kernel")
+        cubin, cubin_size = linker.complete()
+        if cubin is None:
+            log_size = c_size_t()
+            res = nvrtc.nvrtcGetProgramLogSize(prog, byref(log_size)) #prog = NVRTC program handle
+            if res != 0:
+                raise RuntimeError(f"nvrtcGetProgramLog failed: {res}")
+            log_buf = ctypes.create_string_buffer(log_size.value)
+            log_buf.value.decode()
+            print("error", log_buf.value.decode())
+        cubin_buf     = create_string_buffer(cubin, cubin_size)
+        ptx_bytes = ptx.encode('ascii')
+        ptx_buf   = create_string_buffer(ptx_bytes, len(ptx_bytes))
+        ret = _drv.cuModuleLoadDataEx(byref(module_handle),cubin_buf,0,None,None)
+        if ret != 0:
+            err_str = c_char_p()
+            _drv.cuGetErrorString.restype = c_int
+            _drv.cuGetErrorString.argtypes = [c_int, POINTER(c_char_p)]
+            _drv.cuGetErrorString(ret, byref(err_str))
+            raise RuntimeError(f"cuModuleLoadDataEx failed ({ret}): {err_str.value.decode()}")
+        mod_handle = module_handle.value
+        m = re.search(r"\.entry\s+(\w+)", ptx)
+        if not m:
+            raise RuntimeError("Could not find .entry line in PTX")
+        symbol_name = m.group(1).encode('utf-8')
+        print("symbol:", symbol_name)
+        ret  = _drv.cuModuleGetFunction(byref(func_handle), mod_handle, symbol_name)
+        if ret != 0:
+            raise RuntimeError(f"cuModuleGetFunction failed: {ret}")
+        raw_handle = func_handle.value
+        _, bmax = cuOccupancyMaxPotentialBlockSize(raw_handle,0, 0, 0 )
+        
         total_irradiance = self.step(longitudes,d_longitudes, latitudes,d_latitudes,
                         temp, d_temp,s_tot,  d_s_tot,v_m, d_v, R_mean,
-                        d_R_mean, I_star, d_I_star, N_total, d_N_total, time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, bmax
+                        d_R_mean, I_star, d_I_star, N_total, d_N_total, time_steps, R_star, orbital_period_sec, eccentricity, R_exoplanet, bmax, kernel
                         )
-
-
-            
 
         averaged_irradiance = total_irradiance / samples
 
@@ -271,6 +376,4 @@ class Irradiance:
 
         self.array[:] = np.stack([r, green, b], axis=-1).astype(np.uint8)
         return self.array[:]
-
-
 
