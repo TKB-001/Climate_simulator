@@ -1,1 +1,1 @@
-executes main code
+This can be used within a Linux environment (or WSL if you are running Windows) and using a Python virtual environment (.venv), and only if you have a NVIDIA driver. You can install prerequisite modules by first running pip install -r requirements.txt. 
